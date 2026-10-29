@@ -1,97 +1,103 @@
-#Coleta de OHLCV da B3 via yfinance, com limpeza e seleção dos ativos
+# !!! 2 Data collection !!!
 
-
-from __future__ import annotations
 import os
 import time
-import warnings
-from typing import Dict, List
-
 import pandas as pd
+import yfinance as yf
 
-try:
-    import yfinance as yf
-except ImportError as e:
-    raise ImportError("Instale o yfinance: pip install yfinance") from e
+import config
+import names
 
-from config import CFG, DataConfig
-
-
-OHLCV = ["Open", "High", "Low", "Close", "Volume"]
+MAX_TRIES = 3
+WAIT = 5  # seconds between tries and between tickers
 
 
-def download_prices(tickers: List[str], cfg: DataConfig) -> Dict[str, pd.DataFrame]:
+# Tickers of the IBOV csv from B3
+def read_ibov(path):
+    # title line before the header, file in latin1
+    tab = pd.read_csv(path, sep=';', encoding='latin-1', skiprows=1, index_col=False)
 
-    period = f"{cfg.period_years}y"
-    raw: Dict[str, pd.DataFrame] = {}
-    max_retries = 4
-    base_delay = 1.5
+    # last rows are totals without share type
+    tks = []
+    for code, kind in zip(tab.iloc[:, 0], tab.iloc[:, 2]):
+        if pd.notna(kind):
+            tks.append(code + names.B3_SUFFIX)
+    return tks
 
-    print(f"[DATA] Baixando {len(tickers)} ativos | período={period} | "
-          f"intervalo={cfg.interval}")
 
-    for tk in tickers:
-        df = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                df = yf.download(
-                    tk, period=period, interval=cfg.interval,
-                    auto_adjust=cfg.auto_adjust, actions=cfg.actions,
-                    rounding=cfg.rounding,
-                    progress=False, threads=False,
-                )
-            except Exception as exc:
-                df = None
-                if attempt == max_retries:
-                    warnings.warn(f"Falha ao baixar {tk}: {exc}")
-            if df is not None and not df.empty:
-                break
-            if attempt < max_retries:
-                time.sleep(base_delay * (2 ** attempt))
+def download_stock(tk):
+    for i in range(1, MAX_TRIES + 1):
+        try:
+            df = yf.Ticker(tk).history(period=f'{config.YEARS}y', interval=config.INTERVAL,
+                                       auto_adjust=config.AUTO_ADJUST, actions=config.ACTIONS,
+                                       repair=config.REPAIR, rounding=config.ROUNDING)
+            if not df.empty:
+                df.index = df.index.tz_localize(None)  # only the dates matter
+                return df
+        except Exception as e:
+            print(f'Error downloading {tk} (try {i}/{MAX_TRIES}): {e}')
 
-        if df is None or df.empty:
-            warnings.warn(f"{tk}: sem dados após {max_retries} tentativas.")
-            time.sleep(base_delay)
+        if i < MAX_TRIES:
+            time.sleep(WAIT)
+    return None
+
+
+# Raw history from the cache, or downloaded and saved there
+def load_stock(tk):
+    path = os.path.join(config.CACHE_DIR, tk + '.csv')
+    if os.path.exists(path):
+        return pd.read_csv(path, index_col=0, parse_dates=True)
+
+    print('Downloading', tk)
+    df = download_stock(tk)
+    time.sleep(WAIT)  # so yfinance does not block us
+    if df is None:
+        print(f'{tk}: NO DATA AFTER {MAX_TRIES} TRIES')
+        return None
+    df.to_csv(path)
+    return df
+
+
+# Keeps OHLCV and applies the manual fixes of config
+def fix_stock(tk, df):
+    df = df[names.OHLCV].dropna()
+
+    if tk in config.START_DATES:
+        df = df.loc[config.START_DATES[tk]:]
+
+    if tk in config.PRICE_FIXES:
+        date, factor = config.PRICE_FIXES[tk]
+        df = df.copy()
+        df.loc[df.index < date, names.PRICES] *= factor
+    return df
+
+
+# Dict with the OHLCV dataframe of every IBOV stock
+def load_data():
+    os.makedirs(config.CACHE_DIR, exist_ok=True)
+    tks = read_ibov(config.IBOV_FILE)
+    print(f'{len(tks)} stocks in {config.IBOV_FILE}')
+
+    data = {}
+    for tk in tks:
+        if tk in config.EXCLUDED_TICKERS:
+            print(f'Excluded {tk}: {config.EXCLUDED_TICKERS[tk]}')
             continue
 
-        time.sleep(base_delay)
-
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        df = df[[c for c in OHLCV if c in df.columns]].copy().dropna()
-        if len(df) < cfg.min_history:
-            warnings.warn(f"{tk}: histórico curto ({len(df)} candles). Ignorado.")
+        df = load_stock(tk)
+        if df is None:
             continue
 
-        raw[tk] = df
+        df = fix_stock(tk, df)
+        if len(df) < config.MIN_HISTORY_DAYS:
+            print(f'{tk}: SHORT HISTORY ({len(df)} candles), ignored')
+            continue
+        data[tk] = df
 
-    print(f"[DATA] {len(raw)} ativos válidos após limpeza.")
-    return raw
-
-
-def load_dataset(cfg=CFG, use_cache: bool = True) -> Dict[str, pd.DataFrame]:
-
-    os.makedirs(cfg.outputs_dir, exist_ok=True)
-    cache_path = os.path.join(cfg.outputs_dir, "prices_cache.pkl")
-
-    if use_cache and os.path.exists(cache_path):
-        data = pd.read_pickle(cache_path)
-        print(f"[DATA] Cache carregado: {len(data)} ativos ({cache_path})")
-    else:
-        data = download_prices(cfg.tickers, cfg.data)
-        pd.to_pickle(data, cache_path)
-        print(f"[DATA] Cache salvo em {cache_path}")
-
-    # O cache guarda tudo o que foi baixado; a exclusão é aplicada na leitura.
-    removidos = [tk for tk in cfg.excluded if tk in data]
-    data = {tk: df for tk, df in data.items() if tk not in cfg.excluded}
-    for tk in removidos:
-        print(f"[DATA] Excluído {tk}: {cfg.excluded[tk]}")
-    print(f"[DATA] {len(data)} ativos após exclusões.")
+    print(len(data), 'stocks ready')
     return data
 
 
-if __name__ == "__main__":
-    d = load_dataset(CFG)
-    print(d[next(iter(d))].tail())
+if __name__ == '__main__':
+    data = load_data()
+    print(data[config.FOCUS_TICKER].tail())

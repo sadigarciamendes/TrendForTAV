@@ -5,5 +5,4 @@ venv/
 .vscode/
 .idea/
 
-outputs/prices_cache.pkl
-outputs/tensores/
+outputs/tensors/

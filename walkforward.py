@@ -1,126 +1,133 @@
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+# !!! 5 Walk forward validation, splits the timeline into train, validation and test !!!
+#
+# The timeline shared by all stocks is split into N_FOLDS+1 blocks of dates
+# In fold i the model trains on everything before boundary i and is tested on the next block
+#
+#    fold 1  |=train=|gap|val|gap|==test==|
+#    fold 2  |=====train=====|gap|val|gap|==test==|
+#    fold 3  |========train========|gap|val|gap|==test==|
+#
+# val is the end of the training block (VAL_RATIO), only for early stopping
+# gap is HORIZON windows thrown away, the label looks 10 days ahead so without it
+# the last training labels would see the start of val and test
+#
+# The boundaries are calendar dates, the same for every stock, so all stocks
+# fall in the same years in the same fold
 
 import numpy as np
 import pandas as pd
 
-from dataset import AssetPanel
+import config
+import names
+
+MIN_TRAIN = 60  # minimum windows for a stock to enter the fold
+MIN_VAL = 20
+MIN_TEST = 10
 
 
-MIN_TREINO = 60      # janelas mínimas de treino interno para o fold valer
-MIN_VAL = 20         # janelas mínimas de validação interna
-MIN_TESTE = 10       # janelas mínimas de teste
+# k+1 dates evenly spaced on the shared timeline
+def calc_bounds(panels, k):
+    all_dates = []
+    for p in panels.values():
+        all_dates.append(p[names.DATES].values)
+    dates = np.unique(np.concatenate(all_dates))
+    n = len(dates)
+
+    bounds = []
+    for i in range(1, k + 2):
+        pos = min(n * i // (k + 1), n - 1)
+        bounds.append(pd.Timestamp(dates[pos]))
+    return bounds
 
 
-@dataclass
-class FoldRange:
-    """Posições de treino, validação interna e teste de um ativo num fold."""
-    train: np.ndarray
-    val: np.ndarray
-    test: np.ndarray
+# Positions of the train, val and test windows of one stock in one fold
+def split_stock(dates, train_until, test_until):
+    a = int(np.searchsorted(dates, train_until.to_datetime64(), side='left'))  # first test window
+    b = int(np.searchsorted(dates, test_until.to_datetime64(), side='right'))  # one past the last
+    cut = int(a * (1 - config.VAL_RATIO))
+    gap = config.HORIZON
+    return {
+        names.TRAIN: np.arange(0, cut),
+        names.VAL: np.arange(min(cut + gap, a), a),
+        names.TEST: np.arange(min(a + gap, b), b),
+    }
 
 
-@dataclass
-class Fold:
-    """Um fold: fronteiras de calendário e os recortes de cada ativo."""
-    idx: int
-    train_ate: pd.Timestamp
-    teste_ate: pd.Timestamp
-    por_ativo: Dict[str, FoldRange] = field(default_factory=dict)
-
-    @property
-    def n_treino(self) -> int:
-        return sum(len(r.train) for r in self.por_ativo.values())
-
-    @property
-    def n_val(self) -> int:
-        return sum(len(r.val) for r in self.por_ativo.values())
-
-    @property
-    def n_teste(self) -> int:
-        return sum(len(r.test) for r in self.por_ativo.values())
-
-    def periodo_teste(self, panels: Dict[str, AssetPanel]):
-        """Primeira e última data efetivamente testadas no fold."""
-        datas = [panels[tk].dates[r.test] for tk, r in self.por_ativo.items()
-                 if len(r.test)]
-        if not datas:
-            return None, None
-        return min(d[0] for d in datas), max(d[-1] for d in datas)
+def has_enough(parts):
+    return (len(parts[names.TRAIN]) >= MIN_TRAIN
+            and len(parts[names.VAL]) >= MIN_VAL
+            and len(parts[names.TEST]) >= MIN_TEST)
 
 
-def calendar_boundaries(panels: Dict[str, AssetPanel], k: int) -> List[pd.Timestamp]:
-    """k+1 fronteiras de data igualmente espaçadas na linha do tempo comum."""
-    todas = np.unique(np.concatenate([p.dates.values for p in panels.values()]))
-    n = len(todas)
-    return [pd.Timestamp(todas[min(int(n * i / (k + 1)), n - 1)])
-            for i in range(1, k + 2)]
-
-
-def build_folds(panels: Dict[str, AssetPanel], k: int, gap: int,
-                val_ratio: float) -> List[Fold]:
-    """Monta os k folds walk-forward sobre o calendário comum aos ativos."""
-    bounds = calendar_boundaries(panels, k)
-    folds: List[Fold] = []
-
-    for f in range(k):
-        train_ate, teste_ate = bounds[f], bounds[f + 1]
-        fold = Fold(idx=f + 1, train_ate=train_ate, teste_ate=teste_ate)
-
+def build_folds(panels):
+    bounds = calc_bounds(panels, config.N_FOLDS)
+    folds = []
+    for i in range(config.N_FOLDS):
+        fold = {
+            names.FOLD_IDX: i + 1,
+            names.TRAIN_UNTIL: bounds[i],
+            names.TEST_UNTIL: bounds[i + 1],
+            names.STOCKS: {},
+        }
         for tk, p in panels.items():
-            datas = p.dates.values
-            # Região de treino: tudo antes da fronteira. Teste: até a próxima.
-            a = int(np.searchsorted(datas, train_ate.to_datetime64(), side="left"))
-            b = int(np.searchsorted(datas, teste_ate.to_datetime64(), side="right"))
+            parts = split_stock(p[names.DATES].values, bounds[i], bounds[i + 1])
+            if has_enough(parts):
+                fold[names.STOCKS][tk] = parts
 
-            corte = int(a * (1.0 - val_ratio))
-            train = np.arange(0, corte)
-            val = np.arange(min(corte + gap, a), a)
-            test = np.arange(min(a + gap, b), b)
-
-            if (len(train) < MIN_TREINO or len(val) < MIN_VAL
-                    or len(test) < MIN_TESTE):
-                continue
-            fold.por_ativo[tk] = FoldRange(train=train, val=val, test=test)
-
-        if fold.por_ativo:
+        if fold[names.STOCKS]:
             folds.append(fold)
-
-    if not folds:
-        raise RuntimeError(
-            "Nenhum fold válido. Reduza cv_folds ou verifique o histórico dos ativos.")
     return folds
 
 
-def pool(panels: Dict[str, AssetPanel], fold: Fold, group: str,
-         parte: str) -> Tuple[np.ndarray, np.ndarray]:
-    """Junta, entre todos os ativos, as janelas de um grupo numa parte do fold."""
-    Xs, ys = [], []
-    for tk, r in fold.por_ativo.items():
-        idx = getattr(r, parte)
-        if len(idx) == 0:
-            continue
-        Xs.append(panels[tk].X_by_group[group][idx])
-        ys.append(panels[tk].y[idx])
-    if not Xs:
-        raise RuntimeError(f"Fold {fold.idx}: parte '{parte}' vazia no grupo {group}.")
-    return np.concatenate(Xs), np.concatenate(ys)
+# Total windows of one part over all stocks of the fold
+def count(fold, part):
+    total = 0
+    for parts in fold[names.STOCKS].values():
+        total += len(parts[part])
+    return total
 
-def describe_folds(folds: List[Fold], panels: Dict[str, AssetPanel]) -> List[dict]:
-    """Resumo textual/numérico de cada fold, para o relatório."""
-    linhas = []
-    for fd in folds:
-        ini, fim = fd.periodo_teste(panels)
-        linhas.append({
-            "fold": fd.idx,
-            "n_ativos": len(fd.por_ativo),
-            "treina_ate": str(fd.train_ate.date()),
-            "teste_inicio": str(ini.date()) if ini is not None else None,
-            "teste_fim": str(fim.date()) if fim is not None else None,
-            "n_treino": fd.n_treino,
-            "n_validacao": fd.n_val,
-            "n_teste": fd.n_teste,
+
+# First and last date tested in the fold
+def test_period(panels, fold):
+    starts, ends = [], []
+    for tk, parts in fold[names.STOCKS].items():
+        d = panels[tk][names.DATES][parts[names.TEST]]
+        starts.append(d[0])
+        ends.append(d[-1])
+    return min(starts), max(ends)
+
+
+# Windows of one group from every stock in one part of the fold
+def pool(panels, fold, g, part):
+    xs, ys = [], []
+    for tk, parts in fold[names.STOCKS].items():
+        idx = parts[part]
+        xs.append(panels[tk][names.X][g][idx])
+        ys.append(panels[tk][names.Y][idx])
+    return np.concatenate(xs), np.concatenate(ys)
+
+
+def summarize_folds(panels, folds):
+    rows = []
+    for fold in folds:
+        start, end = test_period(panels, fold)
+        rows.append({
+            'fold': fold[names.FOLD_IDX],
+            'n_stocks': len(fold[names.STOCKS]),
+            'train_until': str(fold[names.TRAIN_UNTIL].date()),
+            'test_start': str(start.date()),
+            'test_end': str(end.date()),
+            'n_train': count(fold, names.TRAIN),
+            'n_val': count(fold, names.VAL),
+            'n_test': count(fold, names.TEST),
         })
-    return linhas
+    return rows
+
+
+if __name__ == '__main__':
+    from data_collection import load_data
+    from dataset import build_panels
+
+    panels, _ = build_panels(load_data())
+    folds = build_folds(panels)
+    print(pd.DataFrame(summarize_folds(panels, folds)).to_string(index=False))

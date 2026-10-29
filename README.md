@@ -1,94 +1,119 @@
-# B3 — coleta, tratamento e normalização dos dados
+# TrendForTAV - Trend Forecasting via Technical Analysis Voting
 
-Etapa de dados de um comitê de redes LSTM para previsão de tendência de ações
-da B3 em horizonte de swing trade (10 pregões). O projeto vai da coleta dos
-preços até os tensores prontos para entrar na rede; não há treino nem
-avaliação aqui.
+## B3 - data collection, processing and normalization
 
-## Resumo
+Data stage of a committee of LSTM networks that forecasts the trend of B3
+stocks over a swing trade horizon (10 trading days). The project goes from
+downloading the prices to the tensors ready to feed the networks.
 
-- **Coleta:** OHLCV diário de 100 ativos da B3 via yfinance, 10 anos, preços
-  sem ajuste por proventos (`auto_adjust=False`; o yfinance ainda corrige
-  desdobramentos). Ativos com menos de 400 pregões são descartados.
-- **Features:** 24 indicadores técnicos em 5 grupos, um por especialista do
-  comitê — RSI (5), MACD (5), médias móveis (6), Bandas de Bollinger (4) e
-  OBV/volume (4). Todos ficam em [-1, 1] por construção: diferenças
-  normalizadas (a − b)/(a + b), eventos de cruzamento (±1) e indicadores
-  binários. Não há z-score nem min-max, o que evita vazamento de estatísticas
-  do futuro.
-- **Rótulo:** método de horizonte fixo com limiar dinâmico (López de Prado,
-  2018). O retorno de 10 pregões à frente é comparado a
-  τ = 0,5 · σ₂₀ · √10, onde σ₂₀ é o desvio móvel de 20 retornos diários.
-  Classes: −1 baixa, 0 neutra, +1 alta.
-- **Entrada da rede:** janelas de 30 pregões, com forma
-  `(amostras, 30, n_features)` por grupo.
-- **Validação:** walk-forward com 5 dobras de calendário, iguais para todos os
-  ativos. Os 15% finais do treino de cada dobra servem de validação (early
-  stopping), com vão de 10 janelas entre treino, validação e teste para que o
-  rótulo não enxergue o período seguinte.
+## Summary
 
-## Resultados
+- **Stocks:** current IBOV composition, read from the CSV downloaded from the
+  [B3 website](https://www.b3.com.br/pt_br/market-data-e-indices/indices/indices-amplos/indice-ibovespa-ibovespa-composicao-da-carteira.htm)
+  (`data/IBOVDia_27-10-26.csv`, 76 stocks).
+- **Collection:** daily OHLCV from `yfinance.Ticker(...).history()`, 10 years,
+  prices not adjusted for dividends (`AUTO_ADJUST = False`; yfinance still
+  adjusts splits) and `repair=True`, so yfinance fixes known errors (100x
+  prices, missing split adjustment). Stocks with fewer than 400 trading days
+  are dropped.
+- **Manual data fixes:** checked by hand and listed in `config.py` (see below).
+- **Features:** 24 technical indicators in 5 groups, one per expert of the
+  committee: RSI (5), MACD (5), moving averages (6), Bollinger Bands (4) and
+  OBV/volume (4). All of them stay in [-1, 1] by construction: normalized
+  differences (a - b)/(a + b), crossover events (+-1) and binary flags. There
+  is no z-score or min-max scaling, which avoids leaking statistics from the
+  future.
+- **Label:** fixed horizon method with a dynamic threshold (Lopez de Prado,
+  2018). The return 10 trading days ahead is compared with
+  tau = 0.5 * sigma20 * sqrt(10), where sigma20 is the rolling standard
+  deviation of 20 daily returns. Classes: -1 down, 0 neutral, +1 up.
+- **Network input:** windows of 30 trading days, with shape
+  `(samples, 30, n_features)` per group.
+- **Validation:** walk-forward with 5 calendar folds, the same for every
+  stock. The last 15% of the training block of each fold is used for
+  validation (early stopping), with a gap of 10 windows between train,
+  validation and test so the label never sees the next period.
 
-Download de 23/10/2026 (24/10/2016 a 23/10/2026).
+## Data quality
 
-| Métrica | Valor |
+All 76 stocks were scanned for jumps above 35% in one day, flat prices with
+zero volume, gaps in the dates and periods with almost zero volatility.
+
+| Stock | Problem | Treatment |
+|---|---|---|
+| NATU3 | no data from 2020-01 to 2025-06 (traded as NTCO3, which yfinance does not have) | excluded |
+| UGPA3 | prices before 2021-06-28 are 2.183x too low (+119% jump in one day; volume is right) | prices before the date multiplied by 2.183 |
+| SUZB3 | SUZB3 only started trading in Nov 2017; before it, flat price with zero volume | history starts on 2017-11-10 |
+| TEND3 | listed in May 2017 (spin-off from Gafisa); before it, flat price with zero volume | history starts on 2017-05-04 |
+| CPFE3 | price pinned by the State Grid tender offer during 2017 (tau almost zero) | history starts on 2017-12-01 |
+
+The fixes are applied when the data is read, so the cache always keeps the raw
+yfinance data. The other big one-day moves are real market events (e.g. AXIA3
++49% on 2017-08-22, Eletrobras privatization announcement; PRIO3 -37% on
+2020-03-09, oil crash).
+
+## Results
+
+Download of 2026-10-27 (2016-10-27 to 2026-10-27).
+
+| Metric | Value |
 |---|---|
-| Ativos válidos | 86 |
-| Candles | 196.460 |
-| Janelas de 30 pregões | 175.992 |
-| Baixa / neutra / alta | 29,0% / 38,9% / 32,1% |
-| Limiar τ médio / mediano | 3,71% / 3,26% |
+| Valid stocks | 75 |
+| Candles | 172,747 |
+| Windows of 30 trading days | 154,897 |
+| Down / neutral / up | 28.5% / 39.0% / 32.6% |
+| Mean / median threshold tau | 3.50% / 3.11% |
 
-| Dobra | Treina até | Teste | Treino | Val. | Teste | Ativos |
+| Fold | Train until | Test | Train | Val. | Test | Stocks |
 |---|---|---|---|---|---|---|
-| 1 | 26/03/2019 | 09/04/2019 – 25/09/2020 | 21.431 | 3.161 | 24.956 | 68 |
-| 2 | 25/09/2020 | 09/10/2020 – 06/04/2022 | 43.845 | 7.067 | 25.690 | 70 |
-| 3 | 06/04/2022 | 22/04/2022 – 04/10/2023 | 66.749 | 11.138 | 26.352 | 72 |
-| 4 | 04/10/2023 | 19/10/2023 – 09/04/2025 | 94.567 | 15.893 | 31.562 | 86 |
-| 5 | 09/04/2025 | 25/04/2025 – 08/10/2026 | 122.077 | 20.719 | 31.476 | 86 |
+| 1 | 2019-03-29 | 2019-04-12 to 2020-09-30 | 18,586 | 2,741 | 21,653 | 59 |
+| 2 | 2020-09-30 | 2020-10-15 to 2022-04-08 | 38,942 | 6,270 | 23,058 | 63 |
+| 3 | 2022-04-08 | 2022-04-26 to 2023-10-09 | 59,681 | 9,893 | 23,855 | 65 |
+| 4 | 2023-10-09 | 2023-10-24 to 2025-04-11 | 83,606 | 14,069 | 27,084 | 74 |
+| 5 | 2025-04-11 | 2025-04-29 to 2026-10-13 | 107,659 | 18,288 | 27,450 | 75 |
 
-Dos 100 ativos, 8 não retornaram dados no yfinance (BRFS3, CCRO3, CIEL3,
-CRFB3, GUAR3, JBSS3, PETZ3, STBP3) e 6 foram excluídos por falhas nos dados
-(`config.EXCLUDED`, com o motivo de cada um): NATU3, PCAR3, UGPA3, SUZB3,
-TEND3 e CPFE3.
+Walk-forward figure: [outputs/figures/fig05_walkforward.pdf](outputs/figures/fig05_walkforward.pdf)
 
-![Validação walk-forward](outputs/figuras/fig05_walkforward.png)
+## Files
 
-## Arquivos
-
-| Arquivo | Etapa |
+| File | Stage |
 |---|---|
-| `config.py` | parâmetros: ativos, período, horizonte, janela, dobras e exclusões |
-| `data_collection.py` | download OHLCV via yfinance, limpeza e filtro de histórico mínimo |
-| `features.py` | indicadores transformados em índices de força em [-1, 1] |
-| `dataset.py` | rótulo de 3 classes, alinhamento e janelas de 30 pregões |
-| `walkforward.py` | divisão walk-forward por calendário com vão de 10 janelas |
-| `process_data.py` | executa tudo e salva `outputs/resumo_dados.json` |
-| `export_tensores.py` | tensores prontos para a LSTM, um `.npz` por dobra em `outputs/tensores/` |
-| `visualizacoes.py` | figuras em `outputs/figuras/` |
+| `config.py` | settings: IBOV file, exclusions, manual fixes, period, horizon, window and folds |
+| `names.py` | string constants shared by all files (columns, groups, features, keys) |
+| `data/IBOVDia_*.csv` | IBOV composition downloaded from the B3 website |
+| `data_collection.py` | reads the IBOV file, downloads from yfinance with a cache per stock and applies the fixes |
+| `features.py` | indicators turned into force indexes in [-1, 1] |
+| `dataset.py` | 3-class label, alignment and windows of 30 trading days |
+| `walkforward.py` | calendar walk-forward split with a gap of 10 windows |
+| `export_tensors.py` | tensors ready for the LSTM, one `.npz` per fold in `outputs/tensors/` |
+| `visualizations.py` | vector PDF figures in `outputs/figures/` |
 
-## Uso
+## Usage
 
 ```
 pip install -r requirements.txt
-python process_data.py          # pipeline completo + resumo
-python export_tensores.py       # tensores .npz por dobra
-python visualizacoes.py         # figuras (opcional: python visualizacoes.py VALE3.SA)
+python export_tensors.py        # .npz tensors per fold
+python visualizations.py        # figures (optional: python visualizations.py VALE3.SA)
 ```
 
-A primeira execução baixa os dados e salva `outputs/prices_cache.pkl`; as
-seguintes reutilizam o cache (apague o arquivo para baixar de novo). Como o
-período é relativo à data do download, uma nova coleta pode gerar números
-ligeiramente diferentes dos acima.
+The first run downloads each stock and saves it as a csv in the user cache
+folder (`~/.cache/TrendForTAV/PETR4.SA.csv`, ...). The next runs reuse these
+files; delete one file to download only that stock again, or the whole folder
+to download everything. Since the period is relative to the download date, a
+new download may give numbers slightly different from the ones above.
 
-Cada `foldK.npz` contém `X_{GRUPO}_{train,val,test}` (`float32`,
-`(N, 30, n_features)`), `y_{train,val,test}` (`int8`, −1/0/+1),
-`ticker_*`, `data_*` e `features_{GRUPO}`. Para usar com
-`CrossEntropyLoss` ou `sparse_categorical_crossentropy`, some 1 ao rótulo
-(classes 0, 1, 2).
+To update the stocks, download the new IBOV composition on the B3 website,
+save it in `data/` and change `IBOV_FILE` in `config.py`.
 
-## Limitações
+Each `foldK.npz` contains `X_{GROUP}_{train,val,test}` (`float32`,
+`(N, 30, n_features)`), `y_{train,val,test}` (`int8`, -1/0/+1),
+`ticker_*`, `date_*`, `features_{GROUP}`, `train_until` and `test_until`. To
+use it with `CrossEntropyLoss` or `sparse_categorical_crossentropy`, add 1 to
+the label (classes 0, 1, 2).
 
-- O universo de ativos é a composição atual da bolsa (viés de sobrevivência).
-- Os preços não são ajustados por dividendos e JCP, então as quedas nas
-  datas-ex aparecem nos indicadores e no rótulo.
+## Limitations
+
+- The stock universe is the current IBOV composition, used for the whole
+  period (survivorship bias).
+- Prices are not adjusted for dividends and interest on equity (JCP), so the
+  drops on the ex-dates show up in the indicators and in the label.
