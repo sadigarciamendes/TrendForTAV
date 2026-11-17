@@ -112,7 +112,6 @@ and `outputs/figures/visualizations_sliding/fig05_walkforward.pdf`.
 | `walkforward.py` | calendar walk-forward split, expanding and sliding modes, gap of 10 windows |
 | `export_tensors.py` | tensors ready for the LSTM, one `.npz` per fold in `outputs/tensors/{mode}/` |
 | `visualizations.py` | vector PDF figures in `outputs/figures/visualizations_{mode}/` |
-| `model.py`, `train.py` | expert LSTM and its training (network stage, models in `outputs/models/{mode}/`) |
 
 ## Usage
 
