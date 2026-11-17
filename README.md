@@ -3,8 +3,10 @@
 ## B3 - data collection, processing and normalization
 
 Data stage of a committee of LSTM networks that forecasts the trend of B3
-stocks over a swing trade horizon (10 trading days). The project goes from
-downloading the prices to the tensors ready to feed the networks.
+stocks over a swing trade horizon (10 trading days). Each indicator group
+feeds its own expert LSTM. The project goes from downloading the prices to
+the tensors ready to feed the networks, for two walk-forward schemes
+(expanding and sliding), so both can be trained and compared.
 
 ## Summary
 
@@ -17,12 +19,16 @@ downloading the prices to the tensors ready to feed the networks.
   prices, missing split adjustment). Stocks with fewer than 400 trading days
   are dropped.
 - **Manual data fixes:** checked by hand and listed in `config.py` (see below).
-- **Features:** 24 technical indicators in 5 groups, one per expert of the
-  committee: RSI (5), MACD (5), moving averages (6), Bollinger Bands (4) and
+- **Features:** 20 technical indicators in 5 groups, one per expert of the
+  committee: RSI (5), MACD (5), moving averages (2), Bollinger Bands (4) and
   OBV/volume (4). All of them stay in [-1, 1] by construction: normalized
   differences (a - b)/(a + b), crossover events (+-1) and binary flags. There
   is no z-score or min-max scaling, which avoids leaking statistics from the
   future.
+- **Moving averages:** only the 20 and 100 day SMAs, as the distance between
+  them and their crossover. The EMA9 x EMA20 pair was removed because its
+  force had a 0.97 correlation with the MACD force, so the two experts would
+  see almost the same input.
 - **Label:** fixed horizon method with a dynamic threshold (Lopez de Prado,
   2018). The return 10 trading days ahead is compared with
   tau = 0.5 * sigma20 * sqrt(10), where sigma20 is the rolling standard
@@ -30,9 +36,15 @@ downloading the prices to the tensors ready to feed the networks.
 - **Network input:** windows of 30 trading days, with shape
   `(samples, 30, n_features)` per group.
 - **Validation:** walk-forward with 5 calendar folds, the same for every
-  stock. The last 15% of the training block of each fold is used for
-  validation (early stopping), with a gap of 10 windows between train,
-  validation and test so the label never sees the next period.
+  stock, in two modes:
+  - **expanding:** the train always starts at the beginning of the series and
+    grows one block per fold;
+  - **sliding:** the train is one block long and moves forward with the fold.
+
+  The last 15% of the train of each fold is used for validation (early
+  stopping), with a gap of 10 windows between train, validation and test so
+  the label never sees the next part. The test is the same in both modes, and
+  so is fold 1.
 
 ## Data quality
 
@@ -60,40 +72,55 @@ Download of 2026-10-27 (2016-10-27 to 2026-10-27).
 |---|---|
 | Valid stocks | 75 |
 | Candles | 172,747 |
-| Windows of 30 trading days | 154,897 |
-| Down / neutral / up | 28.5% / 39.0% / 32.6% |
-| Mean / median threshold tau | 3.50% / 3.11% |
+| Windows of 30 trading days | 162,397 |
+| Down / neutral / up | 28.2% / 39.0% / 32.8% |
+| Mean / median threshold tau | 3.50% / 3.10% |
 
-| Fold | Train until | Test | Train | Val. | Test | Stocks |
-|---|---|---|---|---|---|---|
-| 1 | 2019-03-29 | 2019-04-12 to 2020-09-30 | 18,586 | 2,741 | 21,653 | 59 |
-| 2 | 2020-09-30 | 2020-10-15 to 2022-04-08 | 38,942 | 6,270 | 23,058 | 63 |
-| 3 | 2022-04-08 | 2022-04-26 to 2023-10-09 | 59,681 | 9,893 | 23,855 | 65 |
-| 4 | 2023-10-09 | 2023-10-24 to 2025-04-11 | 83,606 | 14,069 | 27,084 | 74 |
-| 5 | 2025-04-11 | 2025-04-29 to 2026-10-13 | 107,659 | 18,288 | 27,450 | 75 |
+The fold boundaries and the test are the same in both modes:
 
-Walk-forward figure: [outputs/figures/fig05_walkforward.pdf](outputs/figures/fig05_walkforward.pdf)
+| Fold | Train until | Test | Test windows | Stocks |
+|---|---|---|---|---|
+| 1 | 2018-11-23 | 2018-12-07 to 2020-06-26 | 22,597 | 59 |
+| 2 | 2020-06-26 | 2020-07-10 to 2022-01-26 | 24,129 | 63 |
+| 3 | 2022-01-26 | 2022-02-09 to 2023-08-21 | 25,278 | 66 |
+| 4 | 2023-08-21 | 2023-09-04 to 2025-03-19 | 28,725 | 75 |
+| 5 | 2025-03-19 | 2025-04-02 to 2026-10-13 | 28,725 | 75 |
+
+Only the train and validation change:
+
+| Fold | Expanding train | Expanding val. | Sliding train | Sliding val. |
+|---|---|---|---|---|
+| 1 | 19,470 | 2,860 | 19,470 | 2,860 |
+| 2 | 40,706 | 6,585 | 20,979 | 3,087 |
+| 3 | 62,588 | 10,430 | 21,818 | 3,206 |
+| 4 | 87,940 | 14,832 | 24,760 | 3,638 |
+| 5 | 112,974 | 19,198 | 24,975 | 3,675 |
+
+Walk-forward figures: `outputs/figures/visualizations_expanding/fig05_walkforward.pdf`
+and `outputs/figures/visualizations_sliding/fig05_walkforward.pdf`.
 
 ## Files
 
 | File | Stage |
 |---|---|
-| `config.py` | settings: IBOV file, exclusions, manual fixes, period, horizon, window and folds |
+| `config.py` | settings: IBOV file, exclusions, manual fixes, period, horizon, window, folds and LSTM |
 | `names.py` | string constants shared by all files (columns, groups, features, keys) |
 | `data/IBOVDia_*.csv` | IBOV composition downloaded from the B3 website |
 | `data_collection.py` | reads the IBOV file, downloads from yfinance with a cache per stock and applies the fixes |
 | `features.py` | indicators turned into force indexes in [-1, 1] |
 | `dataset.py` | 3-class label, alignment and windows of 30 trading days |
-| `walkforward.py` | calendar walk-forward split with a gap of 10 windows |
-| `export_tensors.py` | tensors ready for the LSTM, one `.npz` per fold in `outputs/tensors/` |
-| `visualizations.py` | vector PDF figures in `outputs/figures/` |
+| `walkforward.py` | calendar walk-forward split, expanding and sliding modes, gap of 10 windows |
+| `export_tensors.py` | tensors ready for the LSTM, one `.npz` per fold in `outputs/tensors/{mode}/` |
+| `visualizations.py` | vector PDF figures in `outputs/figures/visualizations_{mode}/` |
+| `model.py`, `train.py` | expert LSTM and its training (network stage, models in `outputs/models/{mode}/`) |
 
 ## Usage
 
 ```
 pip install -r requirements.txt
-python export_tensors.py        # .npz tensors per fold
-python visualizations.py        # figures (optional: python visualizations.py VALE3.SA)
+python export_tensors.py        # .npz tensors of both modes (or: python export_tensors.py sliding)
+python visualizations.py        # figures of both modes (optional: python visualizations.py sliding VALE3.SA)
+python walkforward.py sliding   # fold table of one mode on screen
 ```
 
 The first run downloads each stock and saves it as a csv in the user cache
@@ -106,10 +133,10 @@ To update the stocks, download the new IBOV composition on the B3 website,
 save it in `data/` and change `IBOV_FILE` in `config.py`.
 
 Each `foldK.npz` contains `X_{GROUP}_{train,val,test}` (`float32`,
-`(N, 30, n_features)`), `y_{train,val,test}` (`int8`, -1/0/+1),
-`ticker_*`, `date_*`, `features_{GROUP}`, `train_until` and `test_until`. To
-use it with `CrossEntropyLoss` or `sparse_categorical_crossentropy`, add 1 to
-the label (classes 0, 1, 2).
+`(N, 30, n_features)`, one input per expert), `y_{train,val,test}` (`int8`,
+-1/0/+1, the same for every group), `ticker_*`, `date_*`, `features_{GROUP}`,
+`train_until` and `test_until`. To use it with `CrossEntropyLoss` or
+`sparse_categorical_crossentropy`, add 1 to the label (classes 0, 1, 2).
 
 ## Limitations
 

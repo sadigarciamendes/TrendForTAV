@@ -8,6 +8,7 @@ import names
 EPS = 1e-12
 
 
+
 # Wilder RSI, from 0 to 100
 def calc_rsi(close, n=14):
     delta = close.diff()
@@ -33,8 +34,10 @@ def force(a, b):
 
 
 # +1 when the series crosses zero going up, the opposite going down, 0 otherwise
+# a day exactly on zero keeps the previous side, so a cross is counted once and a touch is not a cross
 def crossover(s):
-    return np.sign(s).diff().fillna(0.0).clip(-1, 1)
+    side = np.sign(s).replace(0.0, np.nan).ffill()  # +1 above zero, -1 below
+    return (side.diff() / 2).fillna(0.0)  # the side changes by 2 on a cross
 
 
 def feats_rsi(close):
@@ -64,19 +67,18 @@ def feats_macd(close):
     return feats
 
 
+def calc_ma(close, short=20, long=100):
+    sma_short = close.rolling(short).mean().rename(f'SMA{short}')
+    sma_long = close.rolling(long).mean().rename(f'SMA{long}')
+    return sma_short, sma_long
+
+
 def feats_ma(close):
-    sma50 = close.rolling(50).mean()
-    sma200 = close.rolling(200).mean()
-    ema9 = ema(close, 9)
-    ema20 = ema(close, 20)
+    short, long = calc_ma(close)
 
     feats = pd.DataFrame(index=close.index)
-    feats[names.PRICE_SMA50_FORCE] = force(close, sma50)
-    feats[names.PRICE_SMA200_FORCE] = force(close, sma200)
-    feats[names.SMA_TREND_FORCE] = force(sma50, sma200)
-    feats[names.EMA_SHORT_FORCE] = force(ema9, ema20)
-    feats[names.GOLDEN_DEATH_CROSS] = crossover(sma50 - sma200)
-    feats[names.EMA_CROSS] = crossover(ema9 - ema20)
+    feats[names.MA_TREND_FORCE] = force(short, long)
+    feats[names.MA_CROSS] = crossover(short - long)
     return feats
 
 
@@ -144,3 +146,5 @@ if __name__ == '__main__':
     for g, tab in feats.items():
         print(f'\n{g} ({tk})')
         print(tab.dropna().tail().round(3))
+
+

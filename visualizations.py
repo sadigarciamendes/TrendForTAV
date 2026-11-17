@@ -1,6 +1,9 @@
 # !!! 7 Figures of the data stage for the paper, saved as vector PDF in outputs/figures !!!
-# python visualizations.py            uses the focus ticker of config
-# python visualizations.py VALE3.SA   another stock in the per stock figures
+# one folder per mode: outputs/figures/visualizations_expanding and visualizations_sliding
+# python visualizations.py                    both modes, focus ticker of config
+# python visualizations.py sliding            only one mode
+# python visualizations.py VALE3.SA           another stock in the per stock figures
+# python visualizations.py sliding VALE3.SA   both can be combined
 
 import os
 import sys
@@ -16,7 +19,7 @@ import config
 import names
 from data_collection import load_data
 from dataset import build_panels, future_return, calc_tau, make_labels
-from features import calc_features, crossover
+from features import calc_features, crossover, calc_ma
 from walkforward import build_folds, count, test_period, pool
 
 COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4']
@@ -28,8 +31,7 @@ GRID = '#e4e3df'
 
 # the other features are 0/1 flags or cross events
 CONTINUOUS = [names.RSI_FORCE, names.MACD_FORCE, names.MACD_SIGNAL_FORCE, names.MACD_HIST,
-              names.PRICE_SMA50_FORCE, names.PRICE_SMA200_FORCE, names.SMA_TREND_FORCE,
-              names.EMA_SHORT_FORCE, names.BB_POSITION, names.BB_VOL_FORCE,
+              names.MA_TREND_FORCE, names.BB_POSITION, names.BB_VOL_FORCE,
               names.OBV_TREND_FORCE, names.VOL_FORCE]
 
 H = config.HORIZON
@@ -61,25 +63,25 @@ def save(fig, file_name, folder):
     print(' ', path)
 
 
-# Fig 1 price with SMA50, SMA200 and the golden and death crosses
+# Fig 1 price with the short and long SMA of the MA group and their crosses
 def fig_price_ma(df, tk, folder):
     close = df[names.CLOSE].astype(float)
-    sma50 = close.rolling(50).mean()
-    sma200 = close.rolling(200).mean()
+    # same function as features.py, so the figure always matches the feature
+    short, long = calc_ma(close)
 
-    cross = crossover(sma50 - sma200)
-    golden = cross[cross > 0].index
-    death = cross[cross < 0].index
+    cross = crossover(short - long)
+    up = cross[cross > 0].index  # short went above the long
+    down = cross[cross < 0].index  # short went below the long
 
     fig, ax = plt.subplots(figsize=(9, 3.6))
     ax.plot(close.index, close, color=COLORS[0], lw=1.0, label='Close (raw)')
-    ax.plot(sma50.index, sma50, color=COLORS[1], label='SMA50')
-    ax.plot(sma200.index, sma200, color=COLORS[2], label='SMA200')
-    ax.scatter(golden, sma50.loc[golden], marker='^', s=60, color=INK,
-               zorder=5, label='Golden cross (+1)')
-    ax.scatter(death, sma50.loc[death], marker='v', s=60, facecolor='white',
-               edgecolor=INK, linewidth=1.2, zorder=5, label='Death cross (-1)')
-    ax.set_title(f'{short_name(tk)} - price and long moving averages')
+    ax.plot(short.index, short, color=COLORS[1], label=short.name)
+    ax.plot(long.index, long, color=COLORS[2], label=long.name)
+    ax.scatter(up, short.loc[up], marker='^', s=60, color=INK,
+               zorder=5, label='Cross up (+1)')
+    ax.scatter(down, short.loc[down], marker='v', s=60, facecolor='white',
+               edgecolor=INK, linewidth=1.2, zorder=5, label='Cross down (-1)')
+    ax.set_title(f'{short_name(tk)} - price and moving averages {short.name} x {long.name}')
     ax.set_ylabel('R$')
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
     ax.legend(ncol=5, loc='upper left', bbox_to_anchor=(0, -0.1))
@@ -95,8 +97,7 @@ def fig_indicators(df, tk, folder, n=250):
         (names.RSI, [(names.RSI_FORCE, names.RSI_FORCE)]),
         (names.MACD, [(names.MACD_FORCE, names.MACD_FORCE),
                       (names.MACD_SIGNAL_FORCE, names.MACD_SIGNAL_FORCE)]),
-        (names.MA, [(names.SMA_TREND_FORCE, f'{names.SMA_TREND_FORCE} (SMA50 x SMA200)'),
-                    (names.EMA_SHORT_FORCE, f'{names.EMA_SHORT_FORCE} (EMA9 x EMA20)')]),
+        (names.MA, [(names.MA_TREND_FORCE, names.MA_TREND_FORCE)]),
         (names.BBANDS, [(names.BB_POSITION, names.BB_POSITION),
                         (names.BB_VOL_FORCE, names.BB_VOL_FORCE)]),
         (names.OBV, [(names.OBV_TREND_FORCE, names.OBV_TREND_FORCE),
@@ -141,14 +142,18 @@ def fig_labeling(df, tk, folder, n=250):
     save(fig, 'fig03_labeling.pdf', folder)
 
 
-# Fig 4 share of each class in total and in the test of each fold
-def fig_classes(panels, folds, folder):
+# Fig 4 share of each class in total and in the train and test of each fold
+def fig_classes(panels, folds, folder, mode):
     rows = [('Total', np.concatenate([p[names.Y] for p in panels.values()]))]
     for fold in folds:
-        rows.append((f'Fold {fold[names.FOLD_IDX]} (test)', pool(panels, fold, names.RSI, names.TEST)[1]))
+        k = fold[names.FOLD_IDX]
+        # y is the same in every group, so any group works (RSI)
+        # the train changes between the modes, the test is the same in both
+        rows.append((f'Fold {k} (train)', pool(panels, fold, names.RSI, names.TRAIN)[1]))
+        rows.append((f'Fold {k} (test)', pool(panels, fold, names.RSI, names.TEST)[1]))
     rows = rows[::-1]  # Total at the top
 
-    fig, ax = plt.subplots(figsize=(8, 3.4))
+    fig, ax = plt.subplots(figsize=(8, 0.3 * len(rows) + 1.2))  # the height grows with the number of bars
     for i, (_, y) in enumerate(rows):
         left = 0.0
         for c in [-1, 0, 1]:
@@ -163,8 +168,8 @@ def fig_classes(panels, folds, folder):
     ax.set_xlim(0, 100)
     ax.set_xlabel('% of windows')
     ax.grid(False)
-    ax.set_title('Class distribution')
-    ax.legend(ncol=3, loc='upper left', bbox_to_anchor=(0, -0.18))
+    ax.set_title(f'Class distribution ({mode})')
+    ax.legend(ncol=3, loc='upper left', bbox_to_anchor=(0, -0.12))
     save(fig, 'fig04_classes.pdf', folder)
 
 
@@ -176,17 +181,26 @@ def val_start(panels, fold):
     return pd.Series(starts).median()
 
 
+# First training date of the fold, over all stocks
+# in expanding it is the start of the series, in sliding it is the boundary SLIDING_BLOCKS blocks before
+def train_start_date(panels, fold):
+    starts = []
+    for tk, parts in fold[names.STOCKS].items():
+        starts.append(panels[tk][names.DATES][parts[names.TRAIN][0]])  # first training window of the stock
+    return min(starts)
+
+
 # Fig 5 timeline of train, validation and test of each fold
-def fig_walkforward(panels, folds, folder):
-    start = min(p[names.DATES][0] for p in panels.values())
+def fig_walkforward(panels, folds, folder, mode):
     end = max(p[names.DATES][-1] for p in panels.values())
 
     fig, ax = plt.subplots(figsize=(9, 3.2))
     for i, fold in enumerate(folds):
         t0, t1 = test_period(panels, fold)
         v0 = val_start(panels, fold)
+        s0 = train_start_date(panels, fold)  # real start of the train, in sliding it is not the start of the series
         row = len(folds) - 1 - i  # fold 1 at the top
-        parts = [(start, v0, COLORS[0], 'Train'),
+        parts = [(s0, v0, COLORS[0], 'Train'),
                  (v0, fold[names.TRAIN_UNTIL], COLORS[1], 'Validation (last 15%)'),
                  (t0, t1, COLORS[2], 'Test')]
 
@@ -206,7 +220,7 @@ def fig_walkforward(panels, folds, folder):
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
     ax.set_xlim(right=mdates.date2num(end) + 520)  # room for the text
     ax.grid(axis='y', visible=False)
-    ax.set_title(f'Walk-forward cross-validation (gap of {H} windows between the parts)')
+    ax.set_title(f'Walk-forward {mode} (gap of {H} windows between the parts)')
     ax.legend(ncol=3, loc='upper left', bbox_to_anchor=(0, -0.12))
     save(fig, 'fig05_walkforward.pdf', folder)
 
@@ -293,7 +307,7 @@ def fig_input_window(p, tk, feat_names, folder):
     save(fig, 'fig08_input_window.pdf', folder)
 
 
-# Last day of every window as a table (windows x 24 features)
+# Last day of every window as a table (windows x all features)
 def last_day_table(panels, feat_names, sample):
     rows = []
     for p in panels.values():
@@ -310,7 +324,7 @@ def last_day_table(panels, feat_names, sample):
     return pd.DataFrame(X[idx], columns=cols)
 
 
-# Fig 9 scale of the 24 features on the last day of the windows
+# Fig 9 scale of all features on the last day of the windows
 def fig_features(panels, feat_names, folder, sample=30000):
     df = last_day_table(panels, feat_names, sample)
 
@@ -348,31 +362,45 @@ def fig_features(panels, feat_names, folder, sample=30000):
     a2.set_title('Flags and events (% different from 0)')
     a2.legend(loc='lower right')
 
-    fig.suptitle(f'Scale of the 24 features on the last day of the window (sample of {len(df):,} windows)',
+    fig.suptitle(f'Scale of the {df.shape[1]} features on the last day of the window (sample of {len(df):,} windows)',
                  x=0.01, ha='left', fontweight='bold')
     fig.tight_layout()
     save(fig, 'fig09_features.pdf', folder)
 
 
-if __name__ == '__main__':
-    tk = sys.argv[1] if len(sys.argv) > 1 else config.FOCUS_TICKER
-    set_style()
-    folder = os.path.join(config.OUTPUT_DIR, names.FIGURES_DIR)
+# All figures of one mode in the folder outputs/figures/visualizations_{mode}
+# figures 4, 5 and 6 depend on the folds, the others are the same in both modes
+def make_figures(data, panels, feat_names, tk, mode):
+    folder = os.path.join(config.OUTPUT_DIR, names.FIGURES_DIR, f'visualizations_{mode}')
     os.makedirs(folder, exist_ok=True)
+    folds = build_folds(panels, mode)
 
-    data = load_data()
-    panels, feat_names = build_panels(data)
-    folds = build_folds(panels)
-    if tk not in panels:
-        sys.exit(f'{tk} is not among the valid stocks')
-
-    print(f'Generating figures ({tk}):')
+    print(f'\nGenerating figures ({tk}, {mode}):')
     fig_price_ma(data[tk], tk, folder)
     fig_indicators(data[tk], tk, folder)
     fig_labeling(data[tk], tk, folder)
-    fig_classes(panels, folds, folder)
-    fig_walkforward(panels, folds, folder)
+    fig_classes(panels, folds, folder, mode)
+    fig_walkforward(panels, folds, folder, mode)
     fig_stocks_over_time(panels, folds, folder)
     fig_tau(data, panels, folder)
     fig_input_window(panels[tk], tk, feat_names, folder)
     fig_features(panels, feat_names, folder)
+
+
+if __name__ == '__main__':
+    # whatever is a mode becomes a mode, the rest is the stock; with no mode it does both
+    args = sys.argv[1:]
+    modes = [a for a in args if a in names.WF_MODES] or names.WF_MODES
+    others = [a for a in args if a not in names.WF_MODES]
+    tk = others[0] if others else config.FOCUS_TICKER
+    set_style()
+
+    # data and panels built only once, used for both modes
+    data = load_data()
+    panels, feat_names = build_panels(data)
+    if tk not in panels:
+        sys.exit(f'{tk} is not among the valid stocks')
+
+    for mode in modes:
+        make_figures(data, panels, feat_names, tk, mode)
+

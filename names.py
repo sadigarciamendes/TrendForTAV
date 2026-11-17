@@ -35,12 +35,8 @@ MACD_HIST_DIR = 'macd_hist_dir'
 MACD_CROSS = 'macd_cross'
 
 # moving averages
-PRICE_SMA50_FORCE = 'price_sma50_force'
-PRICE_SMA200_FORCE = 'price_sma200_force'
-SMA_TREND_FORCE = 'sma_trend_force'
-EMA_SHORT_FORCE = 'ema_short_force'
-GOLDEN_DEATH_CROSS = 'golden_death_cross'
-EMA_CROSS = 'ema_cross'
+MA_TREND_FORCE = 'ma_trend_force'  # short SMA x long SMA
+MA_CROSS = 'ma_cross'
 
 # Bollinger Bands
 BB_POSITION = 'bb_position'
@@ -59,6 +55,11 @@ DATES = 'dates'
 Y = 'y'
 X = 'X'
 
+# walk-forward modes 
+EXPANDING = 'expanding'
+SLIDING = 'sliding'
+WF_MODES = [EXPANDING, SLIDING]
+
 # keys of each fold
 FOLD_IDX = 'idx'
 STOCKS = 'stocks'
@@ -73,3 +74,20 @@ PARTS = [TRAIN, VAL, TEST]
 # output files and folders inside OUTPUT_DIR
 FIGURES_DIR = 'figures'
 TENSORS_DIR = 'tensors'
+
+# classes inside the network 
+
+DOWN = 0
+NEUTRAL = 1
+UP = 2
+N_CLASSES = 3
+
+# models besides the 5 experts of the committee
+ALL = 'ALL'  # single LSTM with the 20 features, baseline of the committee
+COMMITTEE = 'COMMITTEE'
+SOFT = 'SOFT' # committee with the mean of the probabilities
+MAJORITY = 'MAJORITY'
+PERSISTENCE = 'PERSISTENCE'
+
+MODELS_DIR = 'models'
+RESULTS_DIR = 'results'
